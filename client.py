@@ -4,32 +4,9 @@ import argparse
 import pickle
 from sklearn.preprocessing import MinMaxScaler
 from scipy.stats import entropy
-
-import pyemma
-import math
-from os.path import join
+import warnings
 from pythonosc import osc_message_builder
 from pythonosc import udp_client
-
-# root_dir = '/Users/robert_arbon/Google Drive/Research/Sonification/'
-# data_dir = join(root_dir, 'Data/Chodera_data/Processed')
-#
-# # Trajectories
-# entropy = np.load(join(data_dir, 'shannon_entropy_traj_lag1.0ps.npy'))
-# fast_modes = np.load(join(data_dir, 'fast_modes_lag1.0ps.npy'))
-# hmm_traj = np.load(join(data_dir, 'probabilistic_traj_lag1.0ps.npy'))
-# free_energy_traj = np.load(join(data_dir, 'free_energy_traj_lag1.0ps.npy'))
-#
-# # Static properties
-# properties = np.load(join(data_dir, 'static_properties_max_scale.pickle'))
-#
-# # Take derivatives
-# dfast_modes = fast_modes[:-1]-fast_modes[1:]
-# hmm_traj = hmm_traj[1:]
-# entropy = entropy[1:]
-# free_energy_traj = free_energy_traj[1:]
-#
-# Nsteps = hmm_traj.shape[0]
 
 
 def get_traj_info(model):
@@ -54,7 +31,6 @@ def load_hmm(path):
     """
     print('loading HMM object')
     hmm = pickle.load(open(path, 'rb'))
-    print(hmm)
     return hmm
 
 
@@ -85,6 +61,34 @@ def get_param_trajs(model, idx=0):
             'state': model.hidden_state_probabilities[idx]}
 
 
+def get_static_properties(model):
+    # Get free energy, assignments and number of hidden states
+    free_energy_scaled = get_free_energy_traj(model)
+    membership = model.metastable_assignments
+    n_sets = model.nstates
+    # calculate free energy for observed states assigned to each hidden state
+    free_energy_by_state = [free_energy_scaled[np.where(membership == i)[0]] for i in range(n_sets)]
+
+    # Calculate the 'volume' of each hidden state
+    volume_by_state = [np.sum(free_energy_scaled[np.where(membership == i)[0]]) for i in range(n_sets)]
+
+    # Calculate the other properties
+    properties = {}
+    properties['max'] = [np.max(x) for x in free_energy_by_state]
+    properties['min'] = [np.min(x) for x in free_energy_by_state]
+    properties['volume'] = volume_by_state
+
+    # scale the properties to their max values:
+    scaled_properties = {}
+    for k, v in properties.items():
+        signs = np.sign(v)
+        v = np.abs(v)
+        scaled_v = np.array(v) / np.max(v)
+        scaled_v = scaled_v * signs
+        scaled_properties[k] = list(scaled_v)
+
+    return scaled_properties
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--ip", default="127.0.0.1",
@@ -101,28 +105,33 @@ if __name__ == "__main__":
                         help="whether to loop continuously")
     args = parser.parse_args()
 
-    # Get data
-    hmm = load_hmm(args.hmm)
+    # todo make this actually catch the warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
 
-    n_trajs, traj_lens = get_traj_info(hmm)
+        # Get trajectories
+        hmm = load_hmm(args.hmm)
+        n_trajs, traj_lens = get_traj_info(hmm)
+        traj_idx = args.traj_index
+        param_trajs = get_param_trajs(hmm, idx=traj_idx)
 
-    traj_idx = args.traj_index
+        # Broadcast parameters
+        n_steps = traj_lens[traj_idx]
+        n_states = hmm.nstates
+        delay = args.delay
 
-    param_trajs = get_param_trajs(hmm, idx=traj_idx)
+        # Static properties
+        stat_properties = get_static_properties(hmm)
 
     # Setup client
     client = udp_client.SimpleUDPClient(args.ip, args.port)
 
-    # for k, v in properties.items():
-    #     for i, x in enumerate(v):
-    #         client.send_message("/properties/{0}/state{1}".format(k,i), float(x))
-    #
+    print('Broadcasting static properties')
+    for k, v in stat_properties.items():
+        for i, x in enumerate(v):
+            client.send_message("/properties/{0}/state{1}".format(k,i), float(x))
 
-    # Broadcast parameters
-    n_steps = traj_lens[traj_idx]
-    n_states = hmm.n_states
-    delay = args.delay
-
+    print('Broadcasting trajectories')
     # Broadcast loop
     # todo make this respect the loop argument
     for i in range(n_steps):
