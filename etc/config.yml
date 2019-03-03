@@ -1,4 +1,0 @@
-## Runtime configuration for the hmm_to_osc application.
-##
-core:
-  logging: WARN
